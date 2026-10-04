@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Calories</title>
+  <meta name="description" content="Calorie tracker with barcode scanning and Stashcook recipe portions">
+  <meta name="theme-color" content="#2f7d5b">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Calories">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="main"></main>
+  <nav class="tabs">
+    <a href="#/today" data-tab="today"><span>📅</span>Today</a>
+    <a href="#/add" data-tab="add"><span>＋</span>Add</a>
+    <a href="#/recipes" data-tab="recipes"><span>🍲</span>Recipes</a>
+    <a href="#/foods" data-tab="foods"><span>🏷️</span>My foods</a>
+  </nav>
+  <dialog id="sheet"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
