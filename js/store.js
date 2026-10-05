@@ -2,7 +2,8 @@
 const KEY = 'calorie-tracker.v1';
 
 const DEFAULTS = () => ({
-  settings: { goal: 2000, protein: 0, carbs: 0, fat: 0, tbspMl: 20 },
+  // Macro targets in grams (0 = not tracked); sodium in mg.
+  settings: { goal: 2000, protein: 0, carbs: 0, fat: 0, fibre: 0, sugar: 0, sat: 0, sodium: 0, tbspMl: 20 },
   foods: [],     // the user's own products (scanned or typed in)
   recipes: [],
   log: {},       // 'YYYY-MM-DD' → entries

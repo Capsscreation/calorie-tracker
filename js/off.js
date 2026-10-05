@@ -27,6 +27,19 @@ export function mapProduct(p) {
       };
     }
   }
+  // Extras are per 100 g; Open Food Facts gives sodium in grams.
+  const extras = {};
+  const k100 = kcal == null && servingG ? 100 / servingG : null;
+  const extra = (key, field, mult = 1) => {
+    let v = num(n[`${field}_100g`]);
+    if (v == null && k100) { const s = num(n[`${field}_serving`]); if (s != null) v = s * k100; }
+    if (v != null) extras[key] = Math.round(v * mult * 100) / 100;
+  };
+  extra('sat', 'saturated-fat');
+  extra('sugar', 'sugars');
+  extra('fibre', 'fiber');
+  extra('sodium', 'sodium', 1000);
+
   return {
     name: (p.product_name_en || p.product_name || p.generic_name || '').trim() || 'Unnamed product',
     brand: (p.brands || '').split(',')[0].trim(),
@@ -34,6 +47,7 @@ export function mapProduct(p) {
     per100: {
       kcal: per100.kcal != null ? Math.round(per100.kcal * 10) / 10 : null,
       p: per100.p ?? 0, c: per100.c ?? 0, f: per100.f ?? 0,
+      ...extras,
     },
     servingG: servingG || null,
     servingLabel: p.serving_size || '',

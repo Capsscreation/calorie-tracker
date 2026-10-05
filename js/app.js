@@ -3,6 +3,7 @@ import { parseIngredient, parseRecipeText, matchBuiltIn, gramsFor, ingredientKey
 import { lookupBarcode, searchProducts } from './off.js';
 import { startLiveScan, scanImageFile } from './scanner.js';
 import { fileToThumb, cacheRemoteImage } from './images.js';
+import { readLabel, previewOf } from './label.js';
 import { state, save, replaceState, uid } from './store.js';
 
 const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
@@ -54,8 +55,30 @@ const r0 = n => Math.round(n || 0);
 const r1 = n => { n = n || 0; return Math.abs(n) < 10 ? Math.round(n * 10) / 10 : Math.round(n); };
 const kcalStr = n => r0(n).toLocaleString();
 const ZERO = { kcal: 0, p: 0, c: 0, f: 0 };
-const scale = (n, k) => ({ kcal: (n.kcal || 0) * k, p: (n.p || 0) * k, c: (n.c || 0) * k, f: (n.f || 0) * k });
-const sumN = list => list.reduce((a, n) => ({ kcal: a.kcal + n.kcal, p: a.p + n.p, c: a.c + n.c, f: a.f + n.f }), { ...ZERO });
+// Label extras: only known for foods whose label (or Open Food Facts) lists them. Sodium is in mg.
+const EXTRAS = ['sat', 'sugar', 'fibre', 'sodium'];
+const NUTRIENTS = {
+  p: { name: 'Protein', unit: 'g', kind: 'reach' },
+  c: { name: 'Carbs', unit: 'g', kind: 'reach' },
+  f: { name: 'Fat', unit: 'g', kind: 'reach' },
+  fibre: { name: 'Fibre', unit: 'g', kind: 'reach' },
+  sugar: { name: 'Sugars', unit: 'g', kind: 'limit' },
+  sat: { name: 'Saturated fat', unit: 'g', kind: 'limit' },
+  sodium: { name: 'Sodium', unit: 'mg', kind: 'limit' },
+};
+function scale(n, k) {
+  const out = { kcal: (n.kcal || 0) * k, p: (n.p || 0) * k, c: (n.c || 0) * k, f: (n.f || 0) * k };
+  for (const x of EXTRAS) if (n[x] != null) out[x] = n[x] * k;
+  return out;
+}
+function sumN(list) {
+  const out = { ...ZERO };
+  for (const n of list) {
+    for (const k of Object.keys(ZERO)) out[k] += n[k] || 0;
+    for (const x of EXTRAS) if (n[x] != null) out[x] = (out[x] || 0) + n[x];
+  }
+  return out;
+}
 const macros = n => `<span class="m p">P ${r1(n.p)}g</span><span class="m c">C ${r1(n.c)}g</span><span class="m f">F ${r1(n.f)}g</span>`;
 const num = v => { const x = parseFloat(String(v).replace(',', '.')); return isNaN(x) ? null : x; };
 
@@ -188,7 +211,14 @@ function ingStatus(ing) {
   return 'ok';
 }
 
-const recipeTotals = r => sumN(r.ingredients.map(ingNutrition));
+// Label extras (fibre, sugars…) only count for a recipe when every ingredient that has
+// calories lists them. Otherwise the total would silently be an undercount.
+function recipeTotals(r) {
+  const parts = r.ingredients.map(ingNutrition);
+  const t = sumN(parts);
+  for (const x of EXTRAS) if (parts.some(n => n.kcal > 0 && n[x] == null)) delete t[x];
+  return t;
+}
 const getRecipe = id => state.recipes.find(r => r.id === id);
 
 function createRecipe(text, name, servings) {
@@ -254,7 +284,7 @@ function viewToday() {
       <div class="right"><span class="big ${left < 0 ? 'over' : ''}">${kcalStr(Math.abs(left))}</span><small>${left < 0 ? 'over' : 'left'} of ${kcalStr(s.goal)}</small></div>
     </div>
     <div class="bar ${left < 0 ? 'over' : ''}"><i style="width:${pct}%"></i></div>
-    <div class="macros">${macroGoal('protein', 'Protein')}${macroGoal('carbs', 'Carbs')}${macroGoal('fat', 'Fat')}</div>
+    <a class="macros" href="#/macros" aria-label="Open macros">${macroGoal('protein', 'Protein')}${macroGoal('carbs', 'Carbs')}${macroGoal('fat', 'Fat')}</a>
   </section>
   ${MEALS.map(meal => {
     const items = entries.filter(e => e.meal === meal);
@@ -281,8 +311,8 @@ function viewAdd() {
   <div class="tiles">
     <button class="tile" data-act="scan-live"><span class="ti">📷</span>Scan barcode</button>
     <label class="tile"><span class="ti">🖼️</span>Photo of barcode<input type="file" accept="image/*" capture="environment" data-change="barcode-photo" hidden></label>
-    <button class="tile" data-act="enter-barcode"><span class="ti">🔢</span>Type barcode</button>
-    <button class="tile" data-act="new-food"><span class="ti">🏷️</span>From the label</button>
+    <label class="tile"><span class="ti">📸</span>Scan nutrition label<input type="file" accept="image/*" capture="environment" data-change="label-photo" data-new="1" hidden></label>
+    <button class="tile" data-act="new-food"><span class="ti">✍️</span>Type in a label</button>
     <a class="tile" href="#/recipes"><span class="ti">🍲</span>Recipe portion</a>
     <button class="tile" data-act="quick-add"><span class="ti">⚡</span>Quick calories</button>
   </div>
@@ -363,9 +393,41 @@ function updateLogPreview() {
   if (el) el.innerHTML = a ? `<b>${kcalStr(a.per.kcal * a.qty)} kcal</b> ${macros(scale(a.per, a.qty))}` : '<span class="muted">Enter an amount</span>';
 }
 
+const FORM_FIELDS = [
+  ['p', 'Protein (g)'], ['f', 'Fat, total (g)'], ['sat', '– Saturated (g)'], ['c', 'Carbohydrate (g)'],
+  ['sugar', '– Sugars (g)'], ['fibre', 'Dietary fibre (g)'], ['sodium', 'Sodium (mg)'],
+];
+
+// What the form shows: either values read from a label (in the label's own basis and
+// energy unit, so they're easy to check) or the stored per-100 g values.
+function formValues(d) {
+  if (d.form) return d.form;
+  const per = d.per100 || {};
+  const vals = { energy: per.kcal };
+  for (const [k] of FORM_FIELDS) vals[k] = per[k];
+  return { basis: '100', energyUnit: 'kcal', vals };
+}
+
+function readFormIntoDraft() {
+  const form = document.getElementById('food-form');
+  if (!form || !ui.draftFood) return;
+  const fd = new FormData(form);
+  const d = ui.draftFood;
+  for (const k of ['name', 'brand', 'barcode', 'servingLabel']) d[k] = String(fd.get(k) || '').trim();
+  d.unit = fd.get('unit') === 'ml' ? 'ml' : 'g';
+  d.servingG = num(fd.get('servingG'));
+  const vals = { energy: num(fd.get('energy')) };
+  for (const [k] of FORM_FIELDS) vals[k] = num(fd.get(k));
+  d.form = { basis: fd.get('basis') === 'serving' ? 'serving' : '100', energyUnit: fd.get('energyUnit') === 'kj' ? 'kj' : 'kcal', vals };
+}
+
 function viewFoodForm() {
   const d = (ui.draftFood ||= { per100: {} });
-  const v = x => (x == null ? '' : r1(x));
+  const fv = formValues(d);
+  const v = x => (x == null ? '' : Math.round(x * 100) / 100);
+  const ocr = d.ocr;
+  const mark = k => (!ocr ? '' : ocr.found.includes(k) ? 'ocr-ok' : 'ocr-miss');
+  const field = (k, label) => `<label class="${mark(k)}">${label}<input name="${k}" inputmode="decimal" value="${v(fv.vals[k])}"></label>`;
   return `
   <header class="top"><button class="icon-btn" data-act="back" aria-label="Back">‹</button><h1 class="grow">${d.id ? 'Edit food' : 'New food'}</h1></header>
   ${ui.formNote ? `<p class="note">${esc(ui.formNote)}</p>` : ''}
@@ -380,22 +442,31 @@ function viewFoodForm() {
     <label>Name<input name="name" required value="${esc(d.name || '')}" placeholder="e.g. Collagen Co Original"></label>
     <label>Brand<input name="brand" value="${esc(d.brand || '')}"></label>
     <label>Barcode<input name="barcode" inputmode="numeric" value="${esc(d.barcode || '')}"></label>
+    <div class="label-scan">
+      <label class="btn ${ocr ? 'ghost' : ''} wide">📸 ${ocr ? 'Read another photo of the panel' : 'Fill in from a photo of the nutrition panel'}<input type="file" accept="image/*" capture="environment" data-change="label-photo" hidden></label>
+    </div>
+    ${ocr ? `
+    <div class="verify">
+      <p class="note ${ocr.found.length ? '' : 'warn'}">${ocr.found.length
+        ? `Read ${ocr.found.length} values from your photo. <b>Check each one against the label</b>, especially decimal points. Values outlined in amber weren't found, so type them in.`
+        : "Couldn't read numbers from that photo. Try again straight-on, close and in good light, or type the values in while looking at the photo."}</p>
+      <details class="label-photo" open><summary>Your photo of the label</summary><img src="${esc(ocr.photo)}" alt="Photo of the nutrition panel"></details>
+    </div>` : ''}
     <fieldset class="seg-field">
       <legend>The numbers below are per</legend>
-      <label class="seg"><input type="radio" name="basis" value="100" checked><span>100 g / ml</span></label>
-      <label class="seg"><input type="radio" name="basis" value="serving"><span>serving</span></label>
+      <label class="seg"><input type="radio" name="basis" value="100" ${fv.basis !== 'serving' ? 'checked' : ''}><span>100 g / ml</span></label>
+      <label class="seg"><input type="radio" name="basis" value="serving" ${fv.basis === 'serving' ? 'checked' : ''}><span>serving</span></label>
     </fieldset>
     <div class="grid2">
-      <label>Energy<input name="energy" inputmode="decimal" value="${v(d.per100.kcal)}" required></label>
-      <label>Unit<select name="energyUnit"><option value="kcal">kcal (Cal)</option><option value="kj">kJ</option></select></label>
-      <label>Protein (g)<input name="p" inputmode="decimal" value="${v(d.per100.p)}"></label>
-      <label>Carbs (g)<input name="c" inputmode="decimal" value="${v(d.per100.c)}"></label>
-      <label>Fat (g)<input name="f" inputmode="decimal" value="${v(d.per100.f)}"></label>
+      <label class="${mark('energy')}">Energy<input name="energy" inputmode="decimal" value="${v(fv.vals.energy)}" required></label>
+      <label>Unit<select name="energyUnit"><option value="kcal" ${fv.energyUnit !== 'kj' ? 'selected' : ''}>kcal (Cal)</option><option value="kj" ${fv.energyUnit === 'kj' ? 'selected' : ''}>kJ</option></select></label>
+      ${FORM_FIELDS.map(([k, label]) => field(k, label)).join('')}
       <label>Measured in<select name="unit"><option value="g" ${d.unit !== 'ml' ? 'selected' : ''}>grams</option><option value="ml" ${d.unit === 'ml' ? 'selected' : ''}>ml</option></select></label>
       <label>Serving size<input name="servingG" inputmode="decimal" value="${v(d.servingG)}" placeholder="g or ml"></label>
       <label>Serving name<input name="servingLabel" value="${esc(d.servingLabel || '')}" placeholder="e.g. scoop, bar"></label>
     </div>
-    <p class="hint">Australian labels list energy in kJ: pick kJ and copy the number from the “per 100 g” column.</p>
+    <p class="hint">Australian labels list energy in kJ: pick kJ and copy from the “per 100 g” column. Saturated fat, sugars, fibre and sodium are optional.</p>
+    ${ocr ? `<label class="check"><input type="checkbox" id="verified"> I've checked these numbers against the label</label>` : ''}
     <button class="btn wide" type="button" data-act="save-food">Save and log</button>
   </form>`;
 }
@@ -541,6 +612,213 @@ function viewFoods() {
   <div class="list" id="foods-list">${list.map(ref => foodRow(ref, `#/log/food/${ref.id}`)).join('') || '<p class="hint">Foods you scan or enter from a label are saved here.</p>'}</div>`;
 }
 
+// ---------- macros ----------
+
+const GOAL_KEY = { p: 'protein', c: 'carbs', f: 'fat', fibre: 'fibre', sugar: 'sugar', sat: 'sat', sodium: 'sodium' };
+const SPLIT = [['p', 'Protein', 4], ['c', 'Carbs', 4], ['f', 'Fat', 9]];
+const fmtAmt = (v, unit) => (unit === 'mg' ? `${r0(v).toLocaleString()} mg` : `${r1(v)} g`);
+
+function dayTotals(iso) {
+  const entries = state.log[iso] || [];
+  return { entries, parts: entries.map(entryNutrition), tot: sumN(entries.map(entryNutrition)) };
+}
+
+function viewMacros() {
+  const s = state.settings;
+  const { entries, parts, tot } = dayTotals(ui.day);
+  const macroKcal = SPLIT.map(([k, , m]) => tot[k] * m);
+  const splitSum = macroKcal.reduce((a, b) => a + b, 0);
+  const pct = i => (splitSum ? (macroKcal[i] / splitSum) * 100 : 0);
+  const hasTargets = s.protein && s.carbs && s.fat;
+  const targetPct = k => {
+    const g = s[GOAL_KEY[k]];
+    const all = s.protein * 4 + s.carbs * 4 + s.fat * 9;
+    return all ? (g * (k === 'f' ? 9 : 4) / all) * 100 : 0;
+  };
+
+  const targetRow = k => {
+    const meta = NUTRIENTS[k];
+    const goal = s[GOAL_KEY[k]] || 0;
+    const counted = parts.filter(n => n.kcal > 0);
+    const missing = EXTRAS.includes(k) ? counted.filter(n => n[k] == null).length : 0;
+    const v = tot[k];
+    if (v == null && !goal) return '';
+    const over = meta.kind === 'limit' && goal && v > goal;
+    const status = !goal ? '' : meta.kind === 'limit'
+      ? (over ? `<span class="over-txt">${fmtAmt(v - goal, meta.unit)} over</span>` : `${fmtAmt(goal - (v || 0), meta.unit)} left`)
+      : v < goal ? `${fmtAmt(goal - (v || 0), meta.unit)} to go`
+        : k === 'p' || k === 'fibre' ? '✓ reached' : `${fmtAmt(v - goal, meta.unit)} over target`;
+    return `<div class="target ${meta.kind} ${over ? 'is-over' : ''} t-${k}">
+      <div class="target-top"><span>${meta.name}${meta.kind === 'limit' ? ' <small>(limit)</small>' : ''}</span>
+        <b>${v == null ? '—' : fmtAmt(v, meta.unit)}${goal ? `<small> / ${fmtAmt(goal, meta.unit)}</small>` : ''}</b></div>
+      ${goal ? `<div class="bar thin"><i style="width:${Math.min(100, ((v || 0) / goal) * 100)}%"></i></div>` : ''}
+      <div class="target-sub"><span>${status}</span>${missing ? `<span>${missing} of ${counted.length} items don't list this</span>` : ''}</div>
+    </div>`;
+  };
+
+  const key = ui.macroKey || 'p';
+  const meta = NUTRIENTS[key];
+  const ranked = entries.map((e, i) => ({ e, v: parts[i][key] })).filter(x => x.v > 0).sort((a, b) => b.v - a.v);
+  const total = ranked.reduce((a, x) => a + x.v, 0);
+
+  return `
+  <header class="top">
+    <button class="icon-btn" data-act="day" data-d="-1" aria-label="Previous day">‹</button>
+    <h1 class="grow center">Macros · ${esc(dayLabel(ui.day))}</h1>
+    <button class="icon-btn" data-act="day" data-d="1" aria-label="Next day">›</button>
+  </header>
+
+  <section class="card">
+    <h2>Where your calories came from</h2>
+    ${splitSum ? `
+    <div class="split" role="img" aria-label="${SPLIT.map(([, n], i) => `${n} ${r0(pct(i))}%`).join(', ')}">
+      ${SPLIT.map(([k], i) => macroKcal[i] > 0 ? `<i class="seg-${k}" style="flex:${macroKcal[i]}"></i>` : '').join('')}
+    </div>
+    <div class="split-legend">
+      ${SPLIT.map(([k, n], i) => `<div><span class="lg-name"><span class="sw sw-${k}"></span>${n}</span>
+        <b>${r0(pct(i))}%</b><small>${fmtAmt(tot[k], 'g')}${hasTargets ? ` · target ${r0(targetPct(k))}%` : ''}</small></div>`).join('')}
+    </div>` : '<p class="hint">Nothing logged yet.</p>'}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Targets</h2><button class="link" data-act="edit-targets">Edit</button></div>
+    <div class="targets">${Object.keys(NUTRIENTS).map(targetRow).join('') || '<p class="hint">Set protein, carb and fat targets to track them here.</p>'}</div>
+  </section>
+
+  <section class="card">
+    <h2>Last 7 days</h2>
+    ${weekChart(ui.day)}
+  </section>
+
+  <section class="card">
+    <h2>Top sources</h2>
+    <div class="chips">${Object.entries(NUTRIENTS).map(([k, m]) => `<button class="chip ${k === key ? 'on' : ''}" data-act="macro-key" data-key="${k}">${m.name}</button>`).join('')}</div>
+    ${ranked.length ? `<div class="list">${ranked.slice(0, 8).map(({ e, v }) => `
+      <div class="row static">${entryThumb(e)}
+        <div class="row-main"><b>${esc(e.name)}</b><small>${esc([e.meal, entryAmount(e)].filter(Boolean).join(' · '))}</small></div>
+        <div class="row-side">${fmtAmt(v, meta.unit)}<small>${r0((v / total) * 100)}%</small></div></div>`).join('')}</div>`
+    : `<p class="hint">No ${meta.name.toLowerCase()} logged ${ui.day === todayISO() ? 'today' : 'on this day'}.</p>`}
+  </section>`;
+}
+
+// Stacked bars of calories from protein / carbs / fat per day, plus anything logged
+// without a macro breakdown ("Other"). Tap a day to open it.
+function weekChart(endDay) {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(endDay, i - 6));
+  const data = days.map(d => {
+    const t = dayTotals(d).tot;
+    const p = t.p * 4, c = t.c * 4, f = t.f * 9;
+    return { d, t, segs: [['p', p], ['c', c], ['f', f], ['o', Math.max(0, t.kcal - p - c - f)]] };
+  });
+  const goal = state.settings.goal || 0;
+  const peak = Math.max(goal, ...data.map(x => x.segs.reduce((a, [, v]) => a + v, 0)));
+  const step = peak > 2500 ? 1000 : 500;
+  const yMax = Math.max(step, Math.ceil((peak * 1.05) / step) * step);
+  const W = 340, H = 190, L = 40, R = 8, T = 10, B = 24;
+  const pw = W - L - R, ph = H - T - B;
+  const y = v => T + ph - (v / yMax) * ph;
+  const colW = pw / 7, bw = Math.min(26, colW * 0.58);
+  const hasOther = data.some(x => x.segs[3][1] > 1);
+
+  const ticks = [];
+  for (let v = 0; v <= yMax; v += yMax / 2) ticks.push(v);
+  let svg = ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/>
+    <text x="${L - 6}" y="${y(v) + 4}" class="axis" text-anchor="end">${v.toLocaleString()}</text>`).join('');
+
+  data.forEach((x, i) => {
+    const cx = L + colW * i + colW / 2;
+    let base = 0;
+    const live = x.segs.filter(([, v]) => v > 0);
+    live.forEach(([k, v], j) => {
+      const y0 = y(base), y1 = y(base + v);
+      const top = j === live.length - 1;
+      const h = Math.max(0, y0 - y1 - (j > 0 ? 2 : 0));   // 2px surface gap between stacked segments
+      const yy = y1;
+      if (h > 0.5) {
+        const r = top ? Math.min(4, h, bw / 2) : 0;
+        svg += `<path class="mk mk-${k}" d="M${cx - bw / 2},${yy + h} V${yy + r} Q${cx - bw / 2},${yy} ${cx - bw / 2 + r},${yy} H${cx + bw / 2 - r} Q${cx + bw / 2},${yy} ${cx + bw / 2},${yy + r} V${yy + h} Z"/>`;
+      }
+      base += v;
+    });
+    const sel = x.d === ui.day;
+    const lab = x.d === todayISO() ? 'Today' : new Date(x.d + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' });
+    svg += `<text x="${cx}" y="${H - 6}" class="axis ${sel ? 'sel' : ''}" text-anchor="middle">${esc(lab)}</text>`;
+    const tip = `${dayLabel(x.d)}: ${kcalStr(x.t.kcal)} kcal · P ${r0(x.t.p)}g · C ${r0(x.t.c)}g · F ${r0(x.t.f)}g`;
+    svg += `<rect class="hit" x="${L + colW * i}" y="${T}" width="${colW}" height="${ph + B}" data-act="chart-day" data-day="${x.d}"><title>${esc(tip)}</title></rect>`;
+  });
+  if (goal) {
+    svg += `<line x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}" class="goal"/>
+      <text x="${W - R}" y="${y(goal) - 4}" class="axis" text-anchor="end">goal ${goal.toLocaleString()}</text>`;
+  }
+
+  const legend = [['p', 'Protein'], ['c', 'Carbs'], ['f', 'Fat'], ...(hasOther ? [['o', 'Other']] : [])]
+    .map(([k, n]) => `<span><i class="sw sw-${k}"></i>${n}</span>`).join('');
+  return `
+    <div class="chart-legend">${legend}<small>kcal per day</small></div>
+    <svg class="week" viewBox="0 0 ${W} ${H}" role="img" aria-label="Calories per day for the last 7 days, split by macro">${svg}</svg>
+    <p class="hint">Tap a day to see it. “Other” is calories logged without a macro breakdown.</p>
+    <details class="table-view"><summary>Show as table</summary>
+      <table><thead><tr><th>Day</th><th>kcal</th><th>Protein</th><th>Carbs</th><th>Fat</th></tr></thead><tbody>
+      ${data.map(x => `<tr><td>${esc(dayLabel(x.d))}</td><td>${kcalStr(x.t.kcal)}</td><td>${r0(x.t.p)} g</td><td>${r0(x.t.c)} g</td><td>${r0(x.t.f)} g</td></tr>`).join('')}
+      </tbody></table></details>`;
+}
+
+// Reads the targets sheet into grams, whichever mode it is in.
+function collectTargets() {
+  const val = id => num(document.getElementById(id)?.value);
+  const goal = val('t-goal');
+  const out = { goal };
+  for (const [k, , m] of SPLIT) {
+    const v = val(`t-${k}`);
+    out[GOAL_KEY[k]] = v == null ? 0 : ui.targetMode === 'pct' ? Math.round(((goal || 0) * v) / 100 / m) : v;
+  }
+  for (const k of ['fibre', 'sugar', 'sat', 'sodium']) out[k] = val(`t-${k}`) || 0;
+  return out;
+}
+
+function targetsSheet(s = state.settings) {
+  const mode = ui.targetMode || 'g';
+  const pctOf = (g, m) => (s.goal && g ? Math.round((g * m / s.goal) * 100) : '');
+  const macroInput = (k, label, m) => mode === 'g'
+    ? `<label>${label} g<input id="t-${k}" inputmode="decimal" value="${s[GOAL_KEY[k]] || ''}" placeholder="—"></label>`
+    : `<label>${label} %<input id="t-${k}" inputmode="decimal" value="${pctOf(s[GOAL_KEY[k]], m)}" placeholder="—" data-input="target-pct"></label>`;
+  openSheet(`
+    <h2>Targets</h2>
+    <div class="form">
+      <label>Calories per day (kcal)<input id="t-goal" inputmode="numeric" value="${s.goal}" data-input="target-pct"></label>
+      <div class="chips">
+        <button class="chip ${mode === 'g' ? 'on' : ''}" data-act="target-mode" data-mode="g">Grams</button>
+        <button class="chip ${mode === 'pct' ? 'on' : ''}" data-act="target-mode" data-mode="pct">% of calories</button>
+      </div>
+      ${mode === 'pct' ? `<div class="chips">
+        <button class="chip" data-act="target-preset" data-v="30,40,30">Balanced 30/40/30</button>
+        <button class="chip" data-act="target-preset" data-v="40,30,30">Higher protein 40/30/30</button>
+        <button class="chip" data-act="target-preset" data-v="35,20,45">Lower carb 35/20/45</button>
+      </div>` : ''}
+      <div class="grid3">${macroInput('p', 'Protein', 4)}${macroInput('c', 'Carbs', 4)}${macroInput('f', 'Fat', 9)}</div>
+      ${mode === 'pct' ? '<p class="hint" id="t-pct-hint"></p>' : ''}
+      <div class="grid2">
+        <label>Fibre at least (g)<input id="t-fibre" inputmode="decimal" value="${s.fibre || ''}" placeholder="e.g. 25–30"></label>
+        <label>Sugars at most (g)<input id="t-sugar" inputmode="decimal" value="${s.sugar || ''}" placeholder="—"></label>
+        <label>Saturated fat at most (g)<input id="t-sat" inputmode="decimal" value="${s.sat || ''}" placeholder="—"></label>
+        <label>Sodium at most (mg)<input id="t-sodium" inputmode="decimal" value="${s.sodium || ''}" placeholder="e.g. 2000"></label>
+      </div>
+      <p class="hint">Leave a box empty to not track it. These are your own targets, so check with a dietitian or GP if you're unsure.</p>
+    </div>
+    <div class="row-actions"><button class="btn" data-act="save-targets">Save</button><button class="btn ghost" data-act="close-sheet">Cancel</button></div>`);
+  updatePctHint();
+}
+
+function updatePctHint() {
+  const hint = document.getElementById('t-pct-hint');
+  if (!hint) return;
+  const goal = num(document.getElementById('t-goal').value) || 0;
+  const vals = SPLIT.map(([k]) => num(document.getElementById(`t-${k}`).value) || 0);
+  const total = vals.reduce((a, b) => a + b, 0);
+  const grams = SPLIT.map(([, n, m], i) => `${n} ${r0((goal * vals[i]) / 100 / m)} g`).join(' · ');
+  hint.innerHTML = `${grams}${total && Math.round(total) !== 100 ? ` <span class="over-txt">(adds to ${r0(total)}%, not 100%)</span>` : ''}`;
+}
+
 function viewSettings() {
   const s = state.settings;
   return `
@@ -548,11 +826,7 @@ function viewSettings() {
   <section class="card form">
     <h2>Daily goals</h2>
     <label>Calories (kcal)<input inputmode="numeric" value="${s.goal}" data-change="setting" data-key="goal"></label>
-    <div class="grid3">
-      <label>Protein g<input inputmode="numeric" value="${s.protein || ''}" placeholder="—" data-change="setting" data-key="protein"></label>
-      <label>Carbs g<input inputmode="numeric" value="${s.carbs || ''}" placeholder="—" data-change="setting" data-key="carbs"></label>
-      <label>Fat g<input inputmode="numeric" value="${s.fat || ''}" placeholder="—" data-change="setting" data-key="fat"></label>
-    </div>
+    <button class="btn ghost" data-act="edit-targets">Macro & nutrient targets…</button>
   </section>
   <section class="card form">
     <h2>Recipes</h2>
@@ -593,10 +867,11 @@ function render() {
     case 'recipe': html = viewRecipe(a); break;
     case 'foods': html = viewFoods(); break;
     case 'settings': html = viewSettings(); break;
+    case 'macros': html = viewMacros(); break;
     default: html = viewToday();
   }
   main.innerHTML = html;
-  const tab = { '': 'today', today: 'today', settings: 'today', add: 'add', log: 'add', 'food-form': 'add', recipes: 'recipes', 'recipe-new': 'recipes', recipe: 'recipes', foods: 'foods' }[route] || 'today';
+  const tab = { '': 'today', today: 'today', settings: 'today', add: 'add', log: 'add', 'food-form': 'add', recipes: 'recipes', 'recipe-new': 'recipes', recipe: 'recipes', foods: 'foods', macros: 'macros' }[route] || 'today';
   document.querySelectorAll('nav.tabs a').forEach(el => el.toggleAttribute('aria-current', el.dataset.tab === tab));
   if (route === 'log') updateLogPreview();
 }
@@ -616,7 +891,14 @@ function openSheet(html, onClose) {
   ui.onSheetClose = onClose || null;
   if (!sheet.open) sheet.showModal();
 }
-function closeSheet() { if (sheet.open) sheet.close(); }
+// Runs the close handler straight away (the dialog's own close event is async), so a
+// sheet opened right after this one can't swallow it, e.g. leaving the camera running.
+function closeSheet() {
+  const fn = ui.onSheetClose;
+  ui.onSheetClose = null;
+  fn?.();
+  if (sheet.open) sheet.close();
+}
 sheet.addEventListener('close', () => {
   const fn = ui.onSheetClose;
   ui.onSheetClose = null;
@@ -675,7 +957,7 @@ async function liveScanSheet() {
     <h2>Scan barcode</h2>
     <div id="reader" class="reader"></div>
     <p class="hint center">Hold the barcode flat in the box.</p>
-    <button class="btn ghost wide" data-act="close-sheet">Cancel</button>`, () => { cancelled = true; stop?.(); });
+    <div class="row-actions"><button class="btn ghost" data-act="enter-barcode">Type the number</button><button class="btn ghost" data-act="close-sheet">Cancel</button></div>`, () => { cancelled = true; stop?.(); });
   try {
     stop = await startLiveScan('reader', code => { closeSheet(); handleBarcode(code); });
     if (cancelled) stop();
@@ -712,10 +994,10 @@ async function handleBarcode(raw, photo = null) {
       ui.formNote = 'Found on Open Food Facts. Check the numbers against the pack, then save.';
     } else if (product) {
       ui.draftFood = { ...product, per100: {} };
-      ui.formNote = "Found the product, but it has no nutrition info. Enter it from the panel on the pack.";
+      ui.formNote = "Found the product, but it has no nutrition info. Photograph the nutrition panel below, or type it in.";
     } else {
       ui.draftFood = { barcode: code, per100: {}, image: own };
-      ui.formNote = "This one isn't in Open Food Facts yet. Copy the per-100 g column from the nutrition panel. You only need to do this once, because the next scan finds it in My foods.";
+      ui.formNote = "This one isn't in Open Food Facts yet. Photograph the nutrition panel below, or type in the per-100 g column. You only need to do this once, because the next scan finds it in My foods.";
     }
     go('#/food-form');
   } catch (err) {
@@ -827,7 +1109,7 @@ const actions = {
     persist(); closeSheet(); render(); toast('Deleted');
   },
   'scan-live': liveScanSheet,
-  'enter-barcode': barcodeSheet,
+  'enter-barcode': () => { closeSheet(); barcodeSheet(); },
   'lookup-barcode': () => { const v = document.getElementById('bc-input').value; closeSheet(); handleBarcode(v); },
   'new-food': () => { ui.draftFood = { per100: {} }; ui.formNote = ''; go('#/food-form'); },
   'edit-food': el => {
@@ -844,29 +1126,35 @@ const actions = {
     persist(); go('#/foods');
   },
   'save-food': () => {
-    const form = document.getElementById('food-form');
-    const fd = new FormData(form);
-    const name = String(fd.get('name') || '').trim();
-    let energy = num(fd.get('energy'));
-    if (!name) { toast('Give it a name'); return; }
-    if (energy == null) { toast('Enter the energy from the label'); return; }
-    if (fd.get('energyUnit') === 'kj') energy /= 4.184;
-    const servingG = num(fd.get('servingG'));
-    let k = 1;
-    if (fd.get('basis') === 'serving') {
-      if (!servingG) { toast('Enter the serving size so per-serving numbers can be converted'); return; }
-      k = 100 / servingG;
-    }
+    readFormIntoDraft();
     const d = ui.draftFood || {};
+    const { basis, energyUnit, vals } = d.form;
+    if (!d.name) { toast('Give it a name'); return; }
+    if (vals.energy == null) { toast('Enter the energy from the label'); return; }
+    if (d.ocr && !document.getElementById('verified')?.checked) {
+      toast('Check the numbers against the label, then tick the box');
+      document.getElementById('verified')?.closest('label').classList.add('attention');
+      return;
+    }
+    let k = 1;
+    if (basis === 'serving') {
+      if (!d.servingG) { toast('Enter the serving size so per-serving numbers can be converted'); return; }
+      k = 100 / d.servingG;
+    }
+    const per100 = {
+      kcal: (energyUnit === 'kj' ? vals.energy / 4.184 : vals.energy) * k,
+      p: (vals.p || 0) * k, c: (vals.c || 0) * k, f: (vals.f || 0) * k,
+    };
+    for (const x of EXTRAS) if (vals[x] != null) per100[x] = vals[x] * k;
     const food = {
       id: d.id || uid(),
-      name,
-      brand: String(fd.get('brand') || '').trim(),
-      barcode: String(fd.get('barcode') || '').replace(/\D/g, ''),
-      unit: fd.get('unit') === 'ml' ? 'ml' : 'g',
-      per100: { kcal: energy * k, p: (num(fd.get('p')) || 0) * k, c: (num(fd.get('c')) || 0) * k, f: (num(fd.get('f')) || 0) * k },
-      servingG: servingG || null,
-      servingLabel: String(fd.get('servingLabel') || '').trim(),
+      name: d.name,
+      brand: d.brand,
+      barcode: d.barcode.replace(/\D/g, ''),
+      unit: d.unit,
+      per100,
+      servingG: d.servingG || null,
+      servingLabel: d.servingLabel,
       image: d.image || '',
       source: d.source || 'manual',
       created: d.created || Date.now(),
@@ -878,6 +1166,24 @@ const actions = {
     ui.draftFood = null;
     // Replace the form in history so Back doesn't return to it.
     location.replace(`#/log/food/${food.id}`);
+  },
+  'macro-key': el => { ui.macroKey = el.dataset.key; render(); },
+  'chart-day': el => { ui.day = el.dataset.day; render(); },
+  'edit-targets': () => targetsSheet(),
+  'target-mode': el => {
+    const draft = { ...state.settings, ...collectTargets() };
+    ui.targetMode = el.dataset.mode;
+    targetsSheet(draft);
+  },
+  'target-preset': el => {
+    el.dataset.v.split(',').forEach((v, i) => { document.getElementById(`t-${SPLIT[i][0]}`).value = v; });
+    updatePctHint();
+  },
+  'save-targets': () => {
+    const t = collectTargets();
+    if (!(t.goal > 0)) { toast('Enter a calorie target'); return; }
+    Object.assign(state.settings, t);
+    persist(); closeSheet(); render(); toast('Targets saved');
   },
   'remove-photo': () => {
     if (ui.draftFood) ui.draftFood.image = '';
@@ -1036,6 +1342,7 @@ const inputs = {
     document.getElementById('foods-list').innerHTML = list.map(ref => foodRow(ref, `#/log/food/${ref.id}`)).join('') || '<p class="hint">No matches.</p>';
   },
   'log-preview': updateLogPreview,
+  'target-pct': updatePctHint,
   'pick-search': el => { document.getElementById('pick-results').innerHTML = pickResults(el.value); },
   'portion-custom': el => {
     const r = getRecipe(ui.portion?.recipeId);
@@ -1071,6 +1378,40 @@ const changes = {
     } catch (err) {
       closeSheet();
       toast(err.message);
+    }
+  },
+  'label-photo': async el => {
+    const file = el.files?.[0];
+    el.value = '';
+    if (!file) return;
+    if (el.dataset.new || !ui.draftFood) { ui.draftFood = { per100: {} }; ui.formNote = ''; }
+    else readFormIntoDraft();
+    const d = ui.draftFood;
+    openSheet(`<div class="loading"><div class="spinner"></div><p id="ocr-msg">Getting ready…</p>
+      <div class="bar thin ocr-progress"><i id="ocr-bar" style="width:0%"></i></div>
+      <p class="hint center">This happens on your phone. The first time downloads about 10 MB.</p></div>`);
+    try {
+      const [result, photo] = await Promise.all([
+        readLabel(file, (msg, p) => {
+          const m = document.getElementById('ocr-msg');
+          const b = document.getElementById('ocr-bar');
+          if (m) m.textContent = msg;
+          if (b) b.style.width = `${Math.round((p || 0) * 100)}%`;
+        }),
+        previewOf(file),
+      ]);
+      const before = formValues(d);
+      const { energyUnit, ...read } = result.vals;
+      d.form = result.found.length
+        ? { basis: result.basis, energyUnit: energyUnit || before.energyUnit, vals: { ...before.vals, ...read } }
+        : before;
+      if (result.servingG && !d.servingG) d.servingG = result.servingG;
+      d.ocr = { found: result.found, photo };
+      closeSheet();
+      if (location.hash.startsWith('#/food-form')) { render(); window.scrollTo(0, 0); } else go('#/food-form');
+    } catch (err) {
+      closeSheet();
+      toast(err.message || "Couldn't read that photo");
     }
   },
   'food-photo': async el => {

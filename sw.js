@@ -1,9 +1,9 @@
 // Offline support: network first for the app's own files, falling back to the cache.
 // Open Food Facts and the scanner library always go to the network.
-const CACHE = 'calories-v2';
+const CACHE = 'calories-v3';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
-  './js/app.js', './js/foods.js', './js/parse.js', './js/off.js', './js/scanner.js', './js/store.js', './js/images.js',
+  './js/app.js', './js/foods.js', './js/parse.js', './js/off.js', './js/scanner.js', './js/store.js', './js/images.js', './js/label.js',
   './icons/icon.svg', './icons/icon-192.png',
 ];
 
